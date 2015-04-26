@@ -1,0 +1,197 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Daniel Harcek"
+date: "20 March 2015"
+output:
+  md_document:
+    variant: markdown_github
+  html_document:
+    theme: united
+---
+
+## Synopsis
+#### predmachlearn-012 // 6th of April 2015
+
+Predict activity quality class (see below) based on data gathered from accelerometers on the belt, forearm, arm, and dumbell.
+
+You should
+
+* create a report describing how you built your model, 
+* how you used cross validation, 
+* what you think the expected out of sample error is, 
+* and why you made the choices you did. 
+
+You will also use your prediction model to predict 20 different test cases. 
+
+## Description
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. **One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it**. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts **correctly and incorrectly in 5 different ways**. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). 
+
+The training data for this project are available here: 
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here:
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions:
+
+* exactly according to the specification (Class A)
+* throwing the elbows to the front (Class B)
+* lifting the dumbbell only halfway (Class C)
+* lowering the dumbbell only halfway (Class D)
+* throwing the hips to the front (Class E).
+
+Read more: <http://groupware.les.inf.puc-rio.br/har#ixzz3UxT89OCG>
+
+## R-Part
+
+### Load necessary libraries
+
+We load both `rpart` and `randomForest` because as we will later see, regular decision tree performs with low prediction precission so we experiment instead with `randomForest`.
+
+```{r load_libraries}
+library("caret")
+library("corrplot")
+library("rpart")
+library("rattle")
+library("rpart.plot")
+library("randomForest")
+```
+
+### Download and load the data
+
+We download the data if they are not present in working directory and load datasets into the memory.
+
+```{r download_and_read_data}
+URL_BASE <- "https://d396qusza40orc.cloudfront.net/predmachlearn/"
+DATA_TRAINING <- "pml-training.csv"
+DATA_TESTING <- "pml-testing.csv"
+if (!(file.exists(DATA_TRAINING))) {
+  download.file(url=paste(URL_BASE, DATA_TRAINING, sep=""), destfile=DATA_TRAINING, method="curl")
+  download.file(url=paste(URL_BASE, DATA_TESTING, sep=""), destfile=DATA_TESTING, method="curl")
+}
+
+activity_training <- read.csv(file=DATA_TRAINING, head=TRUE, sep=",", na.strings=c("NA","#DIV/0!",""))
+activity_test <- read.csv(file=DATA_TESTING, head=TRUE, sep=",", na.strings=c("NA","#DIV/0!",""))
+```
+
+### Preparing the dataset
+
+We start exploring the data. We see that the number of the predictors is quite hi, but looking at the summary and complete cases we can see that there is a lot of columns with high number of NA's.
+
+```{r basic_exploration}
+ncol(activity_training)
+str(activity_training)
+summary(activity_training) # remove data with a lot of NA's
+table(complete.cases(activity_training))
+```
+
+We will all such data (majority of NA's in predictor observations) and we remove also variables giving no information in relation to predicted class as a timestamp, user name etc.
+
+```{r making_data_tidy}
+activity_training_wo_na <- activity_training[,colSums(is.na(activity_training)) < 19000]
+table(complete.cases(activity_training_wo_na))
+nrow(activity_training_wo_na)
+ncol(activity_training_wo_na)
+
+activity_training_tidy <- activity_training_wo_na[ ,!(names(activity_training_wo_na) %in% c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window"))]
+ncol(activity_training_tidy)
+```
+
+We see that we successfully reduced potential number of predictors from `162` to `52` (if we omit the class value itself). We will further explore predictors having zero variance and highly correlated predictors.
+
+```{r explore_potential_zero_variance}
+nearZeroVar(subset(activity_training_tidy, select=-c(classe)), saveMetrics=TRUE)
+```
+
+It seems that there are no zero variance predictors, let's move on searching for highly correlated data. We compute the correlation matrix and quickly visually inspect the correlation plot. 
+
+```{r highly_correlated_variables}
+cormatrix <- cor(subset(activity_training_tidy, select=-c(classe)))
+corrplot(cormatrix, order = "hclust", type = "lower", main="Dumbbell Biceps Curl Activity Tracker Data", tl.pos="n")
+```
+
+We can see that there is couple of predictors with correlation over level 9 (which is a common default value for cutoff), so we will remove these.
+
+```{r cut_correlated}
+cutcorrelated <- findCorrelation(cormatrix, cutoff=.90, verbose=FALSE)
+length(cutcorrelated)
+activity_training_predictors <- activity_training_tidy[,-cutcorrelated]
+dim(activity_training_predictors)
+```
+
+### Training and testing
+
+We first split the data to training and test set.
+
+```{r create_training_and_data_set}
+set.seed(8)
+trainIndex <- createDataPartition(activity_training_predictors$classe, p=.60, list=FALSE)
+train <- activity_training_predictors[trainIndex, ]
+test <- activity_training_predictors[-trainIndex, ]
+```
+
+Finally we can train a simple classification tree on our data.
+
+```{r train_tree}
+fit <- train(classe ~ ., data=train, method="rpart")
+```
+
+And review properties of our tree. 
+
+```{r check_trained_tree}
+print(fit$finalModel)
+fancyRpartPlot(fit$finalModel)
+
+prediction <- predict(fit, newdata=test)
+confusionMatrix(prediction, test$classe)$overall
+```
+
+And we see that accuracy of trained decision tree is low. 
+We try to improve this preprocessing the data with centering, scaling and doing 3 fold cross validation.
+
+```{r train_tree_preprocess_and_3fold_cv}
+fit <- train(classe ~ ., data=train, method="rpart",
+              preProcess=c("center", "scale"),
+              trControl=trainControl(method="cv", number=3, allowParallel=TRUE))
+
+fit
+prediction <- predict(fit, newdata=test)
+confusionMatrix(prediction, test$classe)
+confusionMatrix(prediction, test$classe)$overall
+```
+
+This did not bring any improvement at all. 
+Let's try random forest. Couple of observations here, I ended up using `randomForest` function since the `train` function from `caret` package was extremely slow. Some posts suggested to use `parRF` method in `caret` to speed things up, but it did not help. I did not used formula form as [advised here](http://stats.stackexchange.com/a/37382) and based on OOB (out of bag) error tracing decided seeing that OOB almost bottomed down around` `ntree` equal 300 to lower down the `ntree` value from `500` (OOB 0.87%) to `300` (OOB 0.91%).
+
+```{r train_random_forest}
+predictors <- subset(train, select=-c(classe))
+decision <- subset(train, select=c(classe))
+fit <- randomForest(predictors,decision[,1], prox=TRUE, ntree=300) # drop empty dimension https://stat.ethz.ch/pipermail/r-help/2008-July/166617.html
+
+prediction <- predict(fit, newdata=test)
+confusionMatrix(prediction, test$classe)$overall
+```
+
+### Final Out Of Sample Error
+
+We see that `randomForest` improved out-of sample accuracy dramatically from `0.49` to `0.99` with trading off the computation time for precision. That means our out of sample error is in the end `0.001`.
+
+### Prediction Assignment Submission
+
+Let's now remove all unused predictors from test data, generate predictions and prepare the submissions.
+```{r predict_test_data_and_prepare_to_submit_answers}
+activity_test_cleaned <- activity_test[names(activity_test) %in% colnames(activity_training_predictors)]
+prediction <- predict(fit, newdata=activity_test_cleaned)
+prediction
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(prediction)
+```
